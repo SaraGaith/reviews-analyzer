@@ -1,6 +1,6 @@
-# 🧠 Reviews Analyzer (Booking / TripAdvisor)
+# 🧠 Reviews Analyzer 
 
-Streamlit project to analyze hotel reviews (Booking / TripAdvisor) using LLM and connect the results with Airtable.  
+Streamlit project to analyze hotel reviews using LLM and connect the results with Airtable.  
 The project allows you to upload a local file (Excel/CSV/JSON) or fetch a dataset from Apify, analyze the reviews, and send the results to Airtable.
 
 ---
@@ -94,3 +94,4 @@ reviews-analyzer/
 - **API Keys** must be stored in `.env` or Streamlit Secrets (never hardcoded).  
 - Do not upload real secrets to GitHub (only `.env.example`).  
 - This project is for academic and research purposes.
+

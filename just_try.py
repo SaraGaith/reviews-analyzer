@@ -2,8 +2,6 @@ import csv
 import re
 import pandas as pd
 from datetime import datetime
-from tkinter import filedialog, messagebox
-import tkinter as tk
 import os
 import requests
 import json
@@ -12,7 +10,6 @@ import logging
 from collections import Counter
 import hashlib
 import base64
-from tkinter import simpledialog
 import time
 from urllib.parse import urlparse
 
@@ -1203,40 +1200,40 @@ class EnhancedFeedbackAnalyzer:
 
         return 'short_text'
 
-    def run_enhanced_analysis(self) -> Optional[str]:
-        """Enhanced main analysis function with LLM-powered processing"""
+    def run_enhanced_analysis(self, file_path: Optional[str] = None) -> Optional[str]:
+        """Enhanced main analysis function with LLM-powered processing.
+        If file_path is provided (e.g., from Streamlit upload), use it.
+        Otherwise fall back to local file picker (only works on desktop)."""
         self.logger.info("🎯 LLM-Powered Review Processor - Advanced AI-Driven Analysis")
         self.logger.info("🧠 STAGE 1: LLM Context Understanding & Smart Cleaning")
         self.logger.info("✂️ STAGE 2: AI-Powered Topic Extraction & Classification")
         self.logger.info("🌐 STAGE 3: Intelligent Quality Assurance")
         self.logger.info("=" * 70)
 
-        # File selection with enhanced support
-        file_path = self._select_file_enhanced()
+        # لو وصل ملف من Streamlit/الخارج، استخدمه. غير هيك جرّب الـ picker المحلي.
         if not file_path:
-            return None
+            file_path = self._select_file_enhanced()
+            if not file_path:
+                self.logger.error("No file selected (headless/server mode needs an uploaded file).")
+                return None
 
         try:
             # Enhanced file reading
             df = self.read_file_enhanced(file_path)
-
             if df is None or df.empty:
                 self.logger.error("File is empty or cannot be read")
                 return None
 
             df = self._ensure_source_column(df)
-
             self.logger.info(f"📊 Loaded {len(df)} rows with {len(df.columns)} columns")
 
             # Enhanced column mapping
             column_mapping = self.smart_column_mapping_enhanced(df)
-
-            # Validate mapping
             if not any(column_mapping.values()):
                 self.logger.error("❌ Could not identify any relevant columns")
                 return None
 
-            # Enhanced processing with progress tracking
+            # Processing
             all_processed = []
             skipped_rows = 0
             processing_stats = {
@@ -1249,9 +1246,8 @@ class EnhancedFeedbackAnalyzer:
             }
 
             self.logger.info(f"\n🔄 Processing {len(df)} rows with LLM-powered analysis...")
-
             for index, row in df.iterrows():
-                if (index + 1) % 10 == 1:  # Show progress every 10 rows
+                if (index + 1) % 10 == 1:
                     self.logger.info(f"\n{'=' * 60}")
                     self.logger.info(f"📝 Processing rows {index + 1}-{min(index + 10, len(df))}/{len(df)}")
 
@@ -1260,8 +1256,6 @@ class EnhancedFeedbackAnalyzer:
                     if processed_rows:
                         all_processed.extend(processed_rows)
                         processing_stats['total_topics'] += len(processed_rows)
-
-                        # Count sentiment distribution
                         for pr in processed_rows:
                             if pr['Positive_text']:
                                 processing_stats['positive_topics'] += 1
@@ -1269,17 +1263,14 @@ class EnhancedFeedbackAnalyzer:
                                 processing_stats['negative_topics'] += 1
                     else:
                         skipped_rows += 1
-
                 except Exception as e:
                     self.logger.error(f"⚠️ Error processing row {index + 1}: {str(e)}")
                     skipped_rows += 1
-                    continue
 
-                # Progress update every 25 rows
                 if (index + 1) % 25 == 0:
                     self._show_progress_stats(index + 1, len(df), processing_stats, skipped_rows)
 
-            # Final results
+            # Finalize
             return self._finalize_enhanced_analysis(all_processed, file_path, processing_stats, skipped_rows, len(df))
 
         except Exception as e:
@@ -1287,40 +1278,29 @@ class EnhancedFeedbackAnalyzer:
             return None
 
     def _select_file_enhanced(self) -> Optional[str]:
-        """Enhanced file selection with better error handling"""
+        """Local-only file picker. Returns None on servers/Streamlit."""
+        import os, sys
+        # سيرفر/Streamlit: لا تستخدمي Tkinter
+        if 'streamlit' in sys.modules or os.environ.get('STREAMLIT_SERVER_ENABLED') == '1':
+            return None
         try:
-            root = tk.Tk()
-            root.withdraw()
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk();
+            root.withdraw();
             root.attributes('-topmost', True)
-
-            file_path = filedialog.askopenfilename(
+            path = filedialog.askopenfilename(
                 title="Select review file (Excel, CSV, or JSON)",
-                filetypes=[
-                    ("All supported", "*.xlsx *.xls *.csv *.json"),
-                    ("Excel files", "*.xlsx *.xls"),
-                    ("CSV files", "*.csv"),
-                    ("JSON files", "*.json"),
-                    ("All files", "*.*")
-                ],
-                parent=root
+                filetypes=[("All supported", "*.xlsx *.xls *.csv *.json"),
+                           ("Excel files", "*.xlsx *.xls"),
+                           ("CSV files", "*.csv"),
+                           ("JSON files", "*.json"),
+                           ("All files", "*.*")]
             )
             root.destroy()
-
-        except Exception as e:
-            self.logger.warning(f"Error opening file dialog: {str(e)}")
-            print("\nPlease enter the full path to the file:")
-            file_path = input("File path: ").strip().strip('"')
-
-        if not file_path:
-            self.logger.error("No file selected")
+            return path if path and os.path.exists(path) else None
+        except Exception:
             return None
-
-        if not os.path.exists(file_path):
-            self.logger.error(f"File not found: {file_path}")
-            return None
-
-        self.logger.info(f"📁 File selected: {os.path.basename(file_path)}")
-        return file_path
 
     def _process_row_enhanced(self, row: pd.Series, column_mapping: Dict[str, Optional[str]],
                               stats: Dict[str, Any]) -> List[Dict[str, str]]:

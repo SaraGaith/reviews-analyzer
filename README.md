@@ -24,7 +24,7 @@ reviews-analyzer/
 - Python 3.9 or higher
 - Airtable account (Base ID, API Key, Table Name)
 - Apify account (for datasets)
-- Claude API Key (Anthropic) or any compatible LLM
+- Claude API Key (Anthropic) 
 
 ---
 
@@ -94,4 +94,5 @@ reviews-analyzer/
 - **API Keys** must be stored in `.env` or Streamlit Secrets (never hardcoded).  
 - Do not upload real secrets to GitHub (only `.env.example`).  
 - This project is for academic and research purposes.
+
 

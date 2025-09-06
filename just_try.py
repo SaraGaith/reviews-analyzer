@@ -156,7 +156,7 @@ class EnhancedFeedbackAnalyzer:
     CONFIDENCE_THRESHOLD = 0.7
 
     def _ensure_source_column(self, df: pd.DataFrame) -> pd.DataFrame:
-        # 0) لو عندك عمود Source بأي حالة، وحّديه لـ 'source' وطبّعي القيم
+        # 0) لو موجودة 'source' خذيها كما هي مع توحيد القيم
         if 'source' not in df.columns:
             for c in df.columns:
                 if c.lower() == 'source':
@@ -164,86 +164,102 @@ class EnhancedFeedbackAnalyzer:
                     break
 
         if 'source' in df.columns and df['source'].astype(str).str.strip().str.len().gt(0).any():
-            df['source'] = (
-                df['source'].astype(str).str.strip().str.lower().replace({
-                    'trip advisor': 'tripadvisor',
-                    'trip_advisor': 'tripadvisor',
-                    'ta': 'tripadvisor',
-                    'booking.com': 'booking',
-                    'bk': 'booking'
-                })
-            )
+            df['source'] = df['source'].astype(str).str.strip().str.lower().replace({
+                'trip advisor': 'tripadvisor',
+                'trip_advisor': 'tripadvisor',
+                'ta': 'tripadvisor',
+                'booking.com': 'booking',
+                'bk': 'booking'
+            })
             return df
 
-        # 1) تجهيزات أسماء الأعمدة (lower) مع الأصلية
+        # 1) خرائط أسماء الأعمدة
         cols_map = {c.lower(): c for c in df.columns}
         cols_lower = list(cols_map.keys())
 
-        # match بالاحتواء (مش تطابق)
-        def any_col_contains(substrs: list[str]) -> bool:
-            return any(any(s in cl for s in substrs) for cl in cols_lower)
-
-        def first_cols_containing(substrs: list[str]) -> list[str]:
+        def cols_containing(*subs: str) -> list[str]:
             out = []
             for cl in cols_lower:
-                if any(s in cl for s in substrs):
+                if any(s in cl for s in subs):
                     out.append(cols_map[cl])
             return out
 
-        # 2) أعمدة URL: أي عمود يحتوي 'url' أينما كان
-        url_cols = first_cols_containing(['url'])
+        # URL columns (أي عمود فيه 'url') مع استبعاد الصور
+        url_cols = [c for c in cols_containing('url') if not any(x in c.lower() for x in ['image', 'photo', 'avatar'])]
 
-        # 3) إشارات عامة على مستوى الجدول
-        looks_booking = any_col_contains(['reviewername', 'reviewdate', 'positivetext', 'negativetext'])
-        looks_tripad = any_col_contains(['bubblerating', 'bubble_rating', 'username', 'publisheddate', 'traveldate'])
+        # إشارات جدولية عامة (للاصطدامات نستخدمها كـ default فقط)
+        has_booking_schema = any(
+            s in cols_lower for s in ['reviewername', 'reviewdate', 'positivetext', 'negativetext'])
+        has_trip_schema = any(
+            s in cols_lower for s in ['bubblerating', 'bubble_rating', 'publisheddate', 'published_date', 'traveldate'])
 
-        default_source = (
-            'booking' if looks_booking and not looks_tripad else
-            'tripadvisor' if looks_tripad and not looks_booking else
+        dataset_default = (
+            'booking' if has_booking_schema and not has_trip_schema else
+            'tripadvisor' if has_trip_schema and not has_booking_schema else
             'unknown'
         )
 
-        # 4) كشف صفّي قوي
+        # 2) أدوات مساعدة
+        def domain_from_url(u: str) -> str:
+            try:
+                return urlparse(u).netloc.lower()
+            except Exception:
+                return u.lower()
+
+        # 3) كشف صفّي بالنقاط
+        reasons = []
+
         def detect_row_source(row: pd.Series) -> str:
-            # أ) مؤشرات TripAdvisor واضحة من أي عمود يحتوي على bubble/publish
-            for col in first_cols_containing(['bubblerating', 'bubble_rating', 'publisheddate', 'published_date']):
+            score_booking = 0
+            score_trip = 0
+            local_reasons = []
+
+            # سكيمة Booking
+            for col in cols_containing('reviewername', 'reviewdate', 'positivetext', 'negativetext'):
                 v = row.get(col)
                 if pd.notna(v) and str(v).strip() != '':
-                    return 'tripadvisor'
+                    score_booking += 3;
+                    local_reasons.append(f"+3 booking:{col}")
 
-            # ب) مؤشرات Booking (reviewer/positive/negative)
-            for col in first_cols_containing(['reviewername', 'reviewdate', 'positivetext', 'negativetext']):
+            # سكيمة TripAdvisor (بدون username)
+            for col in cols_containing('bubblerating', 'bubble_rating', 'publisheddate', 'published_date',
+                                       'traveldate'):
                 v = row.get(col)
                 if pd.notna(v) and str(v).strip() != '':
-                    return 'booking'
+                    score_trip += 3;
+                    local_reasons.append(f"+3 tripadvisor:{col}")
 
-            # ج) من الروابط: أي عمود فيه URL
+            # روابط
             for col in url_cols:
                 u = str(row.get(col) or '').strip().lower()
                 if not u:
                     continue
-                # جرّبي بارسر لكن ما تعلقي عليه
-                try:
-                    from urllib.parse import urlparse
-                    netloc = urlparse(u).netloc.lower()
-                except Exception:
-                    netloc = u
-                if 'tripadvisor' in u or 'tripadvisor' in netloc:
-                    return 'tripadvisor'
-                if 'booking.com' in u or 'booking' in netloc:
-                    return 'booking'
+                d = domain_from_url(u)
+                if 'booking.com' in u or 'booking.com' in d:
+                    score_booking += 2;
+                    local_reasons.append(f"+2 booking:url:{col}")
+                if 'tripadvisor' in u or 'tripadvisor' in d:
+                    score_trip += 2;
+                    local_reasons.append(f"+2 tripadvisor:url:{col}")
 
-            # د) فحص سريع على كل القيم النصية لو مافي أعمدة URL
-            # (أحيانًا الactor يرجّع عمود نصّي فيه المصدر)
-            row_vals = ' '.join([str(x).lower() for x in row.values if isinstance(x, (str, int, float))])[:2000]
-            if 'tripadvisor' in row_vals:
-                return 'tripadvisor'
-            if 'booking.com' in row_vals or ' booking ' in f' {row_vals} ':
+            # قرار
+            if score_booking > score_trip:
+                reasons.append(';'.join(local_reasons) or 'booking:default')
                 return 'booking'
+            if score_trip > score_booking:
+                reasons.append(';'.join(local_reasons) or 'tripadvisor:default')
+                return 'tripadvisor'
 
-            return default_source
+            # تعادل → استخدم default الجدولي
+            reasons.append(';'.join(local_reasons) or f'{dataset_default}:dataset_default')
+            return dataset_default
 
         df['source'] = df.apply(detect_row_source, axis=1).astype(str).str.strip().str.lower()
+
+        # (اختياري) شغّلي السطرين الجايين إذا بدك تشوفي سبب كل قرار:
+        # df['source_reason'] = pd.Series(reasons, index=df.index)
+        # print("Source counts:\n", df['source'].value_counts(dropna=False))
+
         return df
 
         def guess_row(row):

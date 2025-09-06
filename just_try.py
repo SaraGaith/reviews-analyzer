@@ -1756,7 +1756,7 @@ class EnhancedFeedbackAnalyzer:
             raw = raw * 2.0
 
         # نفس منطق التطبيع لديك إلى 0..10 ثم int
-        if 0 <= raw <= 1:
+        if 0 <= raw < 1:
             val = raw * 10
         elif 0 <= raw <= 10:
             val = raw

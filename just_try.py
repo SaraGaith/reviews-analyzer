@@ -156,55 +156,57 @@ class EnhancedFeedbackAnalyzer:
     CONFIDENCE_THRESHOLD = 0.7
 
     def _ensure_source_column(self, df: pd.DataFrame) -> pd.DataFrame:
+        """تحسين كشف مصدر البيانات مع تحديد دقيق لـ TripAdvisor"""
         if 'source' in df.columns:
             return df
 
         cols = {c.lower() for c in df.columns}
 
-        # إشارات Booking.com المُحسّنة
-        booking_signals = [
-            'username', 'checkindate', 'likedtext', 'dislikedtext',
-            'reviewername', 'reviewdate', 'positivetext', 'negativetext',
-            'travelertype', 'userlocation'
-        ]
+        self.logger.info(f"🔍 Analyzing source from columns: {list(cols)}")
 
-        # إشارات TripAdvisor
-        tripadvisor_signals = ['bubblerating', 'publisheddate']
+        # إشارات TripAdvisor القوية (أولوية عالية)
+        strong_tripadvisor = ['bubblerating', 'publisheddate']
 
-        # حساب النقاط
+        # إشارات Booking القوية (أولوية عالية)
+        strong_booking = ['likedtext', 'dislikedtext', 'positivetext', 'negativetext', 'reviewername']
+
+        # فحص الإشارات القوية أولاً
+        for signal in strong_tripadvisor:
+            if signal in cols:
+                df['source'] = 'tripadvisor'
+                self.logger.info(f"✅ Detected TripAdvisor (strong signal: {signal})")
+                return df
+
+        for signal in strong_booking:
+            if signal in cols:
+                df['source'] = 'booking'
+                self.logger.info(f"✅ Detected Booking (strong signal: {signal})")
+                return df
+
+        # إشارات ثانوية
+        booking_signals = ['username', 'checkindate', 'travelertype', 'userlocation', 'reviewdate']
+        tripadvisor_signals = ['username', 'text', 'title']  # TripAdvisor يستخدم هذه أيضاً
+
         booking_score = sum(1 for signal in booking_signals if signal in cols)
         trip_score = sum(1 for signal in tripadvisor_signals if signal in cols)
 
-        # القرار المُحسّن
-        if booking_score > trip_score:
-            default_source = 'booking'
-        elif trip_score > booking_score:
-            default_source = 'tripadvisor'
+        # فحص محتوى التقييمات للتمييز
+        rating_cols = [c for c in df.columns if 'rating' in c.lower()]
+        source_from_rating = self._detect_source_from_ratings(df, rating_cols)
+
+        if source_from_rating:
+            df['source'] = source_from_rating
+            self.logger.info(f"✅ Detected {source_from_rating} (rating analysis)")
+        elif booking_score > trip_score:
+            df['source'] = 'booking'
+            self.logger.info(f"✅ Detected Booking (score: {booking_score} > {trip_score})")
+        elif trip_score > 0:  # أي إشارة لـ TripAdvisor
+            df['source'] = 'tripadvisor'
+            self.logger.info(f"✅ Detected TripAdvisor (score: {trip_score})")
         else:
-            # إذا متساويين، تحقق من إشارات إضافية
-            if 'likedtext' in cols or 'dislikedtext' in cols:
-                default_source = 'booking'
-            elif 'bubblerating' in cols:
-                default_source = 'tripadvisor'
-            else:
-                default_source = 'unknown'
+            df['source'] = 'unknown'
+            self.logger.warning("⚠️ Could not determine source")
 
-        self.logger.info(f"🔍 Source detection: Booking={booking_score}, TripAdvisor={trip_score} → {default_source}")
-
-        df['source'] = default_source
-        return df
-
-        def guess_row(row):
-            # إشارات صفية أوضح
-            if 'bubbleRating' in df.columns or 'publishedDate' in df.columns:
-                if pd.notna(row.get('bubbleRating')) or pd.notna(row.get('publishedDate')):
-                    return 'tripadvisor'
-            if 'reviewerName' in df.columns or 'reviewDate' in df.columns:
-                if pd.notna(row.get('reviewerName')) or pd.notna(row.get('reviewDate')):
-                    return 'booking'
-            return default_source
-
-        df['source'] = df.apply(guess_row, axis=1)
         return df
 
     def _gen_fallback_name(self, source: str = "") -> str:
@@ -1761,18 +1763,10 @@ class EnhancedFeedbackAnalyzer:
         except (ValueError, TypeError):
             return ""
 
-    # للاستبدال في الكود الأصلي، ضع هذه الدالة مكان الدالة الموجودة:
-
     def _normalize_rating_tripaware(self, value: Any, source: str, rating_col_name: Optional[str] = None) -> Optional[
         int]:
-        """
-        تطبيع التقييم حسب المصدر:
-        - Booking.com: يبقى كما هو (1-10)
-        - TripAdvisor: يضرب في 2 (1-5 → 2-10)
-        """
         if pd.isna(value) or str(value).strip() == "":
             return None
-
         try:
             raw = float(str(value).replace(",", "."))
         except (ValueError, TypeError):
@@ -1780,30 +1774,20 @@ class EnhancedFeedbackAnalyzer:
 
         src = (source or "").strip().lower()
         col = (rating_col_name or "").strip().lower()
+        is_trip = (src == 'tripadvisor') or ('bubble' in col) or ('bubblerating' in col)
 
-        # تحديد إذا كان المصدر TripAdvisor
-        is_tripadvisor = (
-                src == 'tripadvisor' or
-                'bubble' in col or
-                'bubblerating' in col or
-                'tripadvisor' in src
-        )
+        # TripAdvisor عادة 1–5 → نضرب ×2 لو بالفعل ضمن النطاق
+        if is_trip and 0 <= raw <= 5:
+            raw = raw * 2.0
 
-        # المنطق الصحيح:
-        if is_tripadvisor:
-            # TripAdvisor: التقييم من 1-5، نضربه في 2 ليصبح 2-10
-            if 1 <= raw <= 5:
-                normalized = raw * 2.0
-            else:
-                return None  # تقييم خارج النطاق المتوقع
+        # نفس منطق التطبيع لديك إلى 0..10 ثم int
+
+        if 0 <= raw <= 10:
+            val = raw
         else:
-            # Booking.com وغيره: التقييم من 1-10، يبقى كما هو
-            if 1 <= raw <= 10:
-                normalized = raw
-            else:
-                return None  # تقييم خارج النطاق المتوقع
+            return None
+        return int(round(val))
 
-        return int(round(normalized))
     def _clean_country_str(self, s: str) -> str:
         s = str(s).strip()
         # مسافات وحدّة

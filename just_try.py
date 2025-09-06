@@ -155,14 +155,12 @@ class EnhancedFeedbackAnalyzer:
     MAX_RETRIES = 3
     CONFIDENCE_THRESHOLD = 0.7
 
-    def _ensure_source_column(self, df: pd.DataFrame, mode: str = "schema") -> pd.DataFrame:
+    def _ensure_source_column(self, df: pd.DataFrame, add_reason: bool = False) -> pd.DataFrame:
         """
-        Detect 'source' using column *names only* (schema-based).
-        mode="schema"  → صارم ودقيق: يعتمد على أسماء الأعمدة ووجود قيم فيها
-        mode="hybrid"  → يمكنك لاحقًا توسيعه إن أردت، لكن الافتراضي هو 'schema'
+        يحدد 'source' باعتماد صارم على سكيمة الأعمدة وقيمها فقط (بدون rating).
         """
 
-        # 0) لو فيه Source جاهز، وحّديه ورجّعيه
+        # لو فيه عمود Source متعبّي مسبقاً، طبّعيه وارجعيه
         if 'source' not in df.columns:
             for c in df.columns:
                 if c.lower() == 'source':
@@ -178,80 +176,72 @@ class EnhancedFeedbackAnalyzer:
             })
             return df
 
-        # 1) خرائط أعمدة قوية لكل منصة (Apify)
-        # Booking.com: وجود إيجابي/سلبي واسم المراجع/تاريخ المراجعة ميزات مميزة جدًا
-        BOOKING_STRONG = {
-            'reviewername', 'reviewdate', 'positivetext', 'negativetext'
+        # خريطة أسماء الأعمدة (lower -> الأصل)
+        cols_map = {c.lower(): c for c in df.columns}
+
+        # مفاتيح مميِّزة لكل منصة (lowercase) بناءً على سكيمتك
+        # TripAdvisor: travelDate, tripType, title, text (+ احتمالات bubble/published)
+        TRIP_KEYS = {
+            'traveldate', 'triptype', 'title', 'text',
+            'bubblerating', 'publisheddate', 'published_date'
         }
-        # TripAdvisor: bubbleRating / travelDate / publishedDate مميزة
-        TRIP_STRONG = {
-            'bubblerating', 'bubble_rating', 'traveldate', 'publisheddate', 'published_date'
+
+        # Booking: userName, checkInDate, likedText, dislikedText, userLocation,
+        # reviewTitle, travelerType (+ احتمالات reviewerName/reviewDate/positive/negative)
+        BOOKING_KEYS = {
+            'username', 'checkindate', 'likedtext', 'dislikedtext', 'userlocation',
+            'reviewtitle', 'travelertype', 'reviewername', 'reviewdate',
+            'positivetext', 'negativetext'
         }
-        # إشارات ضعيفة (نستخدمها فقط لحسم الافتراضي الجدولي عند التعادل)
-        BOOKING_WEAK = {'reviewtext', 'reviewtitle', 'reviewerlocation', 'reviewercountry', 'userlocation',
-                        'user_location'}
-        TRIP_WEAK = {'username', 'title', 'text'}
 
-        cols_lower = {c.lower(): c for c in df.columns}  # map lower → original
+        # الأعمدة المميّزة الموجودة فعلياً في df
+        trip_cols_in_df = [cols_map[k] for k in TRIP_KEYS if k in cols_map]
+        booking_cols_in_df = [cols_map[k] for k in BOOKING_KEYS if k in cols_map]
 
-        def present(any_set: set[str]) -> set[str]:
-            return {cols_lower[c] for c in cols_lower if c in any_set}
+        # افتراضي على مستوى الجدول (للتعادل الصفّي)
+        score_trip_tbl = len(trip_cols_in_df)
+        score_booking_tbl = len(booking_cols_in_df)
+        dataset_default = (
+            'tripadvisor' if score_trip_tbl > score_booking_tbl
+            else 'booking' if score_booking_tbl > score_trip_tbl
+            else 'unknown'
+        )
 
-        booking_strong_cols = present(BOOKING_STRONG)
-        trip_strong_cols = present(TRIP_STRONG)
-        booking_weak_cols = present(BOOKING_WEAK)
-        trip_weak_cols = present(TRIP_WEAK)
+        # tool صغير
+        def non_empty(v) -> bool:
+            return (v is not None) and (not (isinstance(v, float) and pd.isna(v))) and (str(v).strip() != '')
 
-        # 2) افتراضي الجدول (dataset default) بالاعتماد على توفر الأعمدة
-        score_booking_tbl = (3 * len(booking_strong_cols)) + (1 * len(booking_weak_cols))
-        score_trip_tbl = (3 * len(trip_strong_cols)) + (1 * len(trip_weak_cols))
+        reasons = []  # اختياري: نشرح القرار
 
-        if score_booking_tbl > score_trip_tbl:
-            dataset_default = 'booking'
-        elif score_trip_tbl > score_booking_tbl:
-            dataset_default = 'tripadvisor'
-        else:
-            dataset_default = 'unknown'
-
-        # 3) قرار صفّي: إن وُجدت قيمة في أي عمود قوي للبوكنج/تريب، نقرّر بناءً على ذلك.
-        reasons = []
-
-        def row_source(row: pd.Series) -> str:
-            # نقاط صارمة: وجود أي قيمة غير فارغة في الأعمدة القوية
-            s_booking = 0
+        def detect_row_source(row: pd.Series) -> str:
             s_trip = 0
-            local = []
+            s_book = 0
+            why = []
 
-            for col in booking_strong_cols:
-                v = row.get(col)
-                if pd.notna(v) and str(v).strip() != '':
-                    s_booking += 3
-                    local.append(f"+3 booking:{col}")
+            # +2 لكل عمود مميّز موجود وفيه قيمة
+            for col in trip_cols_in_df:
+                if non_empty(row.get(col)):
+                    s_trip += 2
+                    why.append(f"+2 trip:{col}")
+            for col in booking_cols_in_df:
+                if non_empty(row.get(col)):
+                    s_book += 2
+                    why.append(f"+2 booking:{col}")
 
-            for col in trip_strong_cols:
-                v = row.get(col)
-                if pd.notna(v) and str(v).strip() != '':
-                    s_trip += 3
-                    local.append(f"+3 tripadvisor:{col}")
-
-            # لا نفحص نصوص حرّة ولا URLs — هذا ما كان يسبب الخلط سابقًا.
-
-            if s_booking > s_trip:
-                reasons.append(';'.join(local) or 'booking:table_default')
-                return 'booking'
-            if s_trip > s_booking:
-                reasons.append(';'.join(local) or 'tripadvisor:table_default')
+            # قرار نهائي بدون أي اعتماد على rating
+            if s_trip > s_book:
+                reasons.append(';'.join(why) or 'tripadvisor:dataset_default')
                 return 'tripadvisor'
+            if s_book > s_trip:
+                reasons.append(';'.join(why) or 'booking:dataset_default')
+                return 'booking'
 
-            # تعادل: نستخدم افتراضي الجدول
-            reasons.append(';'.join(local) or f'{dataset_default}:dataset_default')
+            reasons.append(';'.join(why) or f'{dataset_default}:dataset_default')
             return dataset_default
 
-        df['source'] = df.apply(row_source, axis=1).astype(str).str.strip().str.lower()
-
-        # (اختياري) اشّغلي السطر التالي لو حابة تشوفي سبب القرار لكل صف:
-        # df['source_reason'] = pd.Series(reasons, index=df.index)
-
+        df['source'] = df.apply(detect_row_source, axis=1).astype(str).str.strip().str.lower()
+        if add_reason:
+            df['source_reason'] = pd.Series(reasons, index=df.index)
         return df
 
         def guess_row(row):

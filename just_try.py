@@ -156,57 +156,82 @@ class EnhancedFeedbackAnalyzer:
     CONFIDENCE_THRESHOLD = 0.7
 
     def _ensure_source_column(self, df: pd.DataFrame) -> pd.DataFrame:
-        """تحسين كشف مصدر البيانات مع تحديد دقيق لـ TripAdvisor"""
-        if 'source' in df.columns:
+        # 1) وحّدي حالة الاسم: إذا عندك "Source" (كبيرة) حوّليها لـ "source" (صغيرة)
+        if 'source' not in df.columns:
+            for c in df.columns:
+                if c.lower() == 'source':
+                    df['source'] = df[c].astype(str).str.strip().str.lower()
+                    break
+
+        # 2) لو صار عندنا 'source' وفيه قيم غير فاضية، خلّيه زي ما هو
+        if 'source' in df.columns and df['source'].astype(str).str.strip().str.len().gt(0).any():
+            # نزلي كل القيم لسمول وثبّتي الأسماء الشائعة
+            df['source'] = df['source'].astype(str).str.strip().str.lower().replace({
+                'trip advisor': 'tripadvisor',
+                'trip_advisor': 'tripadvisor',
+                'ta': 'tripadvisor',
+                'booking.com': 'booking',
+                'bk': 'booking'
+            })
             return df
 
-        cols = {c.lower() for c in df.columns}
+        # 3) لو ما في عمود مصدر أو فاضي → استدلال ذكي من الأعمدة/الروابط
+        cols_lower = {c.lower(): c for c in df.columns}
 
-        self.logger.info(f"🔍 Analyzing source from columns: {list(cols)}")
+        def has(col_key):
+            return col_key in cols_lower
 
-        # إشارات TripAdvisor القوية (أولوية عالية)
-        strong_tripadvisor = ['bubblerating', 'publisheddate']
+        def val(row, col_key):
+            c = cols_lower.get(col_key)
+            return row.get(c) if c in row.index else None
 
-        # إشارات Booking القوية (أولوية عالية)
-        strong_booking = ['likedtext', 'dislikedtext', 'positivetext', 'negativetext', 'reviewername']
+        # مؤشرات عامة
+        looks_booking = any(k in cols_lower for k in ['reviewername', 'reviewdate', 'positivetext', 'negativetext'])
+        looks_tripad = any(k in cols_lower for k in ['username', 'publisheddate', 'bubblerating', 'text', 'traveldate'])
 
-        # فحص الإشارات القوية أولاً
-        for signal in strong_tripadvisor:
-            if signal in cols:
-                df['source'] = 'tripadvisor'
-                self.logger.info(f"✅ Detected TripAdvisor (strong signal: {signal})")
-                return df
+        # جرّبي التقاط أعمدة URL شائعة
+        url_cols = [k for k in cols_lower if k in ('url', 'pageurl', 'sourceurl', 'reviewurl')]
 
-        for signal in strong_booking:
-            if signal in cols:
-                df['source'] = 'booking'
-                self.logger.info(f"✅ Detected Booking (strong signal: {signal})")
-                return df
+        default_source = (
+            'booking' if looks_booking and not looks_tripad else
+            'tripadvisor' if looks_tripad and not looks_booking else
+            'unknown'
+        )
 
-        # إشارات ثانوية
-        booking_signals = ['username', 'checkindate', 'travelertype', 'userlocation', 'reviewdate']
-        tripadvisor_signals = ['username', 'text', 'title']  # TripAdvisor يستخدم هذه أيضاً
+        def detect_source_row(row: pd.Series) -> str:
+            # إشارات واضحة لِـ TripAdvisor
+            if has('bubblerating') and pd.notna(val(row, 'bubblerating')):
+                return 'tripadvisor'
+            if has('publisheddate') and pd.notna(val(row, 'publisheddate')):
+                return 'tripadvisor'
+            # إشارات واضحة لِـ Booking
+            if has('reviewername') or has('reviewdate') or has('positivetext') or has('negativetext'):
+                if any(pd.notna(val(row, k)) for k in ['reviewername', 'reviewdate', 'positivetext', 'negativetext'] if
+                       has(k)):
+                    return 'booking'
+            # من الرابط
+            for ucol in url_cols:
+                u = str(val(row, ucol) or '').lower()
+                if 'tripadvisor' in u:
+                    return 'tripadvisor'
+                if 'booking.com' in u or 'booking' in u:
+                    return 'booking'
+            return default_source
 
-        booking_score = sum(1 for signal in booking_signals if signal in cols)
-        trip_score = sum(1 for signal in tripadvisor_signals if signal in cols)
+        df['source'] = df.apply(detect_source_row, axis=1).astype(str).str.strip().str.lower()
+        return df
 
-        # فحص محتوى التقييمات للتمييز
-        rating_cols = [c for c in df.columns if 'rating' in c.lower()]
-        source_from_rating = self._detect_source_from_ratings(df, rating_cols)
+        def guess_row(row):
+            # إشارات صفية أوضح
+            if 'bubbleRating' in df.columns or 'publishedDate' in df.columns:
+                if pd.notna(row.get('bubbleRating')) or pd.notna(row.get('publishedDate')):
+                    return 'tripadvisor'
+            if 'reviewerName' in df.columns or 'reviewDate' in df.columns:
+                if pd.notna(row.get('reviewerName')) or pd.notna(row.get('reviewDate')):
+                    return 'booking'
+            return default_source
 
-        if source_from_rating:
-            df['source'] = source_from_rating
-            self.logger.info(f"✅ Detected {source_from_rating} (rating analysis)")
-        elif booking_score > trip_score:
-            df['source'] = 'booking'
-            self.logger.info(f"✅ Detected Booking (score: {booking_score} > {trip_score})")
-        elif trip_score > 0:  # أي إشارة لـ TripAdvisor
-            df['source'] = 'tripadvisor'
-            self.logger.info(f"✅ Detected TripAdvisor (score: {trip_score})")
-        else:
-            df['source'] = 'unknown'
-            self.logger.warning("⚠️ Could not determine source")
-
+        df['source'] = df.apply(guess_row, axis=1)
         return df
 
     def _gen_fallback_name(self, source: str = "") -> str:
@@ -1369,7 +1394,7 @@ class EnhancedFeedbackAnalyzer:
         return self._create_output_rows(base_data, topics)
 
     def _extract_base_data(self, row: pd.Series, column_mapping: Dict[str, Optional[str]]) -> Dict[str, str]:
-        source_val = row.get('source', '')
+        source_val = str(row.get('source') or row.get('Source') or '').strip().lower()
         rating_col = column_mapping.get('rating', '')
         rating_raw = row.get(rating_col, '')
 
@@ -1383,9 +1408,9 @@ class EnhancedFeedbackAnalyzer:
             'name': name,
             'date': self.normalize_data(row.get(column_mapping.get('date', ''), ''), 'date'),
             'country': self.normalize_data(row.get(column_mapping.get('country', ''), ''), 'country'),
-            'rating': self._normalize_rating_tripaware(rating_raw, source_val, rating_col),  # ← هنا التحويل
+            'rating': self._normalize_rating_tripaware(rating_raw, source_val, rating_col),
             'trip_type': self.normalize_data(row.get(column_mapping.get('trip_type', ''), ''), 'text'),
-            'source': source_val,  # مفيد لو حابة تدفعيه لـ Airtable
+            'source': source_val,
         }
 
     def _extract_review_content(self, row: pd.Series, column_mapping: Dict[str, Optional[str]]) -> Dict[str, str]:

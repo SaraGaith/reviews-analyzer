@@ -1737,10 +1737,18 @@ class EnhancedFeedbackAnalyzer:
         except (ValueError, TypeError):
             return ""
 
+    # للاستبدال في الكود الأصلي، ضع هذه الدالة مكان الدالة الموجودة:
+
     def _normalize_rating_tripaware(self, value: Any, source: str, rating_col_name: Optional[str] = None) -> Optional[
         int]:
+        """
+        تطبيع التقييم حسب المصدر:
+        - Booking.com: يبقى كما هو (1-10)
+        - TripAdvisor: يضرب في 2 (1-5 → 2-10)
+        """
         if pd.isna(value) or str(value).strip() == "":
             return None
+
         try:
             raw = float(str(value).replace(",", "."))
         except (ValueError, TypeError):
@@ -1748,20 +1756,30 @@ class EnhancedFeedbackAnalyzer:
 
         src = (source or "").strip().lower()
         col = (rating_col_name or "").strip().lower()
-        is_trip = (src == 'tripadvisor') or ('bubble' in col) or ('bubblerating' in col)
 
-        # TripAdvisor عادة 1–5 → نضرب ×2 لو بالفعل ضمن النطاق
-        if is_trip and 0 <= raw <= 5:
-            raw = raw * 2.0
+        # تحديد إذا كان المصدر TripAdvisor
+        is_tripadvisor = (
+                src == 'tripadvisor' or
+                'bubble' in col or
+                'bubblerating' in col or
+                'tripadvisor' in src
+        )
 
-        # نفس منطق التطبيع لديك إلى 0..10 ثم int
-
-        if 0 <= raw <= 10:
-            val = raw
+        # المنطق الصحيح:
+        if is_tripadvisor:
+            # TripAdvisor: التقييم من 1-5، نضربه في 2 ليصبح 2-10
+            if 1 <= raw <= 5:
+                normalized = raw * 2.0
+            else:
+                return None  # تقييم خارج النطاق المتوقع
         else:
-            return None
-        return int(round(val))
+            # Booking.com وغيره: التقييم من 1-10، يبقى كما هو
+            if 1 <= raw <= 10:
+                normalized = raw
+            else:
+                return None  # تقييم خارج النطاق المتوقع
 
+        return int(round(normalized))
     def _clean_country_str(self, s: str) -> str:
         s = str(s).strip()
         # مسافات وحدّة

@@ -1718,12 +1718,13 @@ class EnhancedFeedbackAnalyzer:
 
         # إذا ما قدر يفهم الصيغة، رجّع فاضي
         return ""
+
     def _normalize_rating(self, rating: Any) -> Optional[int]:
         if pd.isna(rating):
             return None
         try:
             r = float(str(rating).replace(",", "."))
-            if 0 < r < 1:
+            if 0 < r < 1:  # <-- تعديل هنا (بدل 0 <= r <= 1)
                 val = r * 10
             elif 0 <= r <= 10:
                 val = r

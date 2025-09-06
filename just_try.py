@@ -155,20 +155,44 @@ class EnhancedFeedbackAnalyzer:
     MAX_RETRIES = 3
     CONFIDENCE_THRESHOLD = 0.7
 
-
     def _ensure_source_column(self, df: pd.DataFrame) -> pd.DataFrame:
-        # لو العمود موجود أصلاً، خلّيه
         if 'source' in df.columns:
             return df
 
         cols = {c.lower() for c in df.columns}
 
-        # دلائل Booking و TripAdvisor
-        looks_booking = any(k in cols for k in ['reviewername', 'reviewdate', 'positivetext', 'negativetext'])
-        looks_tripad = any(k in cols for k in ['username', 'publisheddate', 'bubblerating', 'text'])
+        # إشارات Booking.com المُحسّنة
+        booking_signals = [
+            'username', 'checkindate', 'likedtext', 'dislikedtext',
+            'reviewername', 'reviewdate', 'positivetext', 'negativetext',
+            'travelertype', 'userlocation'
+        ]
 
-        default_source = 'booking' if looks_booking and not looks_tripad else \
-            'tripadvisor' if looks_tripad and not looks_booking else 'unknown'
+        # إشارات TripAdvisor
+        tripadvisor_signals = ['bubblerating', 'publisheddate']
+
+        # حساب النقاط
+        booking_score = sum(1 for signal in booking_signals if signal in cols)
+        trip_score = sum(1 for signal in tripadvisor_signals if signal in cols)
+
+        # القرار المُحسّن
+        if booking_score > trip_score:
+            default_source = 'booking'
+        elif trip_score > booking_score:
+            default_source = 'tripadvisor'
+        else:
+            # إذا متساويين، تحقق من إشارات إضافية
+            if 'likedtext' in cols or 'dislikedtext' in cols:
+                default_source = 'booking'
+            elif 'bubblerating' in cols:
+                default_source = 'tripadvisor'
+            else:
+                default_source = 'unknown'
+
+        self.logger.info(f"🔍 Source detection: Booking={booking_score}, TripAdvisor={trip_score} → {default_source}")
+
+        df['source'] = default_source
+        return df
 
         def guess_row(row):
             # إشارات صفية أوضح
@@ -1032,7 +1056,6 @@ class EnhancedFeedbackAnalyzer:
         return df
 
     def smart_column_mapping_enhanced(self, df: pd.DataFrame) -> Dict[str, Optional[str]]:
-        """Enhanced column mapping with better pattern recognition"""
         columns = df.columns.tolist()
         mapping = {
             'name': None, 'date': None, 'country': None, 'rating': None,
@@ -1040,93 +1063,61 @@ class EnhancedFeedbackAnalyzer:
             'general_feedback': None, 'trip_type': None
         }
 
-
         self.logger.info("🔍 Enhanced column analysis...")
         self.logger.info(f"📋 Available columns: {columns}")
 
-        # Enhanced pattern matching
-        enhanced_patterns = {
-            'name': r'(^|_)(name|author|customer|guest|user(?!location)|reviewer)($|_)|^اسم$|^שם$|^לקוח$',
-            'date': r'(date|time|created|posted|review.*date|timestamp|تاريخ|זמן|תאריך)',
-            'country': r'(country|nation|location|region|origin|userlocation|מדינה|ארץ)',
-            'rating': r'(rating|score|stars|grade|points|تقييم|דירוג|ציון)',
-            'review_title': r'(^|_)(title|headline|subject)($|_)|عنوان|כותרת',
-            'liked_text': r'(^|_)(liked|likedtext|pros|positive|advantages)($|_)|إيجابي|חיובי|טוב',
-            'disliked_text': r'(^|_)(disliked|dislikedtext|cons|negative|disadvantages)($|_)|سلبي|שלילי|רע',
-            'general_feedback': r'(^|_)(review|comment|feedback|text|content|message|description)($|_)|تعليق|ביקורת|תגובה',
-            'trip_type': r'(trip|travel|type|purpose|category|نوع|סוג)'
+        # خريطة مباشرة لأعمدة Booking.com الشائعة
+        direct_mapping = {
+            'userName': 'name',
+            'checkInDate': 'date',
+            'userLocation': 'country',
+            'rating': 'rating',
+            'reviewTitle': 'review_title',
+            'likedText': 'liked_text',
+            'dislikedText': 'disliked_text',
+            'travelerType': 'trip_type',
+            # Excel format
+            'reviewerName': 'name',
+            'reviewDate': 'date',
+            'reviewerCountry': 'country',
+            'positiveText': 'liked_text',
+            'negativeText': 'disliked_text'
         }
 
-        # Score-based matching
-        column_scores = {col: {} for col in columns}
-
+        # تطبيق الخريطة المباشرة أولاً
         for col in columns:
-            col_lower = col.lower().replace(' ', '_').replace('-', '_')
-            content_type = self.analyze_column_content_enhanced(df, col)
+            if col in direct_mapping:
+                target = direct_mapping[col]
+                mapping[target] = col
+                self.logger.info(f"✅ Direct mapping: {col} → {target}")
 
-            self.logger.info(f"🔎 Analyzing: {col} → {content_type}")
-            # لا تسمح بترشيح أعمدة تشبه الدولة كـ name
-            skip_name_for_this_col = self._is_country_like(col_lower)
+        # أنماط للحالات غير المغطاة
+        patterns = {
+            'name': r'(name|user(?!location)|author|reviewer)',
+            'date': r'(date|time|checkin)',
+            'country': r'(country|location|nation)',
+            'rating': r'(rating|score|stars)',
+            'review_title': r'(title|headline)',
+            'liked_text': r'(liked|positive|pros)',
+            'disliked_text': r'(disliked|negative|cons)',
+            'trip_type': r'(trip|travel|type)'
+        }
 
-            for purpose, pattern in enhanced_patterns.items():
-                if purpose == 'name' and skip_name_for_this_col:
-                    continue
-                if re.search(pattern, col_lower, re.IGNORECASE):
-                    score = 1.0
-                    if any(word in col_lower for word in pattern.replace('(', '').replace(')', '').split('|')):
-                        score += 0.5
-                    if purpose == 'date' and content_type in ['date', 'timestamp']:
-                        score += 1.0
-                    elif purpose == 'rating' and content_type == 'rating':
-                        score += 1.0
-                    elif purpose in ['liked_text', 'disliked_text', 'general_feedback'] and content_type in [
-                        'long_text', 'medium_text']:
-                        score += 0.5
-                    column_scores[col][purpose] = score
+        # ملء الفجوات بالأنماط
+        for purpose, pattern in patterns.items():
+            if not mapping[purpose]:  # فقط إذا لم يتم العثور على تطابق مباشر
+                for col in columns:
+                    if re.search(pattern, col, re.IGNORECASE):
+                        mapping[purpose] = col
+                        self.logger.info(f"✅ Pattern mapping: {col} → {purpose}")
+                        break
 
-            # Pattern matching with scoring
-            for purpose, pattern in enhanced_patterns.items():
-                if re.search(pattern, col_lower, re.IGNORECASE):
-                    score = 1.0
-
-                    # Boost score for exact matches
-                    if any(word in col_lower for word in pattern.replace('(', '').replace(')', '').split('|')):
-                        score += 0.5
-
-                    # Content type validation
-                    if purpose == 'date' and content_type in ['date', 'timestamp']:
-                        score += 1.0
-                    elif purpose == 'rating' and content_type == 'rating':
-                        score += 1.0
-                    elif purpose in ['liked_text', 'disliked_text', 'general_feedback'] and content_type in [
-                        'long_text', 'medium_text']:
-                        score += 0.5
-
-                    column_scores[col][purpose] = score
-
-        # Assign columns based on highest scores
-        used_columns = set()
-        for purpose in mapping.keys():
-            best_col = None
-            best_score = 0
-
-            for col in columns:
-                if col in used_columns:
-                    continue
-                score = column_scores[col].get(purpose, 0)
-                if score > best_score:
-                    best_score = score
-                    best_col = col
-
-            if best_col and best_score > 0.5:  # Minimum confidence threshold
-                mapping[purpose] = best_col
-                used_columns.add(best_col)
-                self.logger.info(f"✅ {purpose}: {best_col} (confidence: {best_score:.2f})")
-
-        # حارس نهائي: لو Name وقع على عمود يشبه الدولة رجّعيه None
-        if mapping.get('name') and self._is_country_like(mapping['name'].lower()):
-            self.logger.warning("⚠️ Name mapped to a location-like column; resetting to None (will use fallback).")
-            mapping['name'] = None
+        # طباعة النتائج النهائية
+        for purpose, col in mapping.items():
+            if col:
+                self.logger.info(f"✅ Final: {purpose} = {col}")
+            else:
+                self.logger.warning(f"❌ Missing: {purpose}")
 
         return mapping
 

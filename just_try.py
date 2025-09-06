@@ -1723,7 +1723,7 @@ class EnhancedFeedbackAnalyzer:
             return None
         try:
             r = float(str(rating).replace(",", "."))
-            if 0 <= r <= 1:
+            if 0 < r < 1:
                 val = r * 10
             elif 0 <= r <= 10:
                 val = r
@@ -1737,20 +1737,31 @@ class EnhancedFeedbackAnalyzer:
         except (ValueError, TypeError):
             return ""
 
-    def _normalize_rating(self, rating: Any) -> Optional[int]:
-        if pd.isna(rating):
+    def _normalize_rating_tripaware(self, value: Any, source: str, rating_col_name: Optional[str] = None) -> Optional[
+        int]:
+        if pd.isna(value) or str(value).strip() == "":
             return None
         try:
-            r = float(str(rating).replace(",", "."))
-            if 0 < r < 1:  # <-- تعديل هنا (بدل 0 <= r <= 1)
-                val = r * 10
-            elif 0 <= r <= 10:
-                val = r
-            else:
-                return None
-            return int(round(val))
+            raw = float(str(value).replace(",", "."))
         except (ValueError, TypeError):
             return None
+
+        src = (source or "").strip().lower()
+        col = (rating_col_name or "").strip().lower()
+        is_trip = (src == 'tripadvisor') or ('bubble' in col) or ('bubblerating' in col)
+
+        # TripAdvisor عادة 1–5 → نضرب ×2 لو بالفعل ضمن النطاق
+        if is_trip and 0 <= raw <= 5:
+            raw = raw * 2.0
+
+        # نفس منطق التطبيع لديك إلى 0..10 ثم int
+        if 0 <= raw <= 1:
+            val = raw * 10
+        elif 0 <= raw <= 10:
+            val = raw
+        else:
+            return None
+        return int(round(val))
 
     def _clean_country_str(self, s: str) -> str:
         s = str(s).strip()
